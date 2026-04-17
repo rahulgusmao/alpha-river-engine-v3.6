@@ -1,0 +1,25 @@
+# Alpha River Engine — Dependências
+# Python 3.11+
+
+# ── HTTP / WebSocket ──────────────────────────────
+aiohttp>=3.9.0          # cliente HTTP assíncrono + WebSocket
+
+# ── Persistência ──────────────────────────────────
+aiosqlite>=0.20.0       # SQLite assíncrono (State Manager)
+
+# ── Matemática / Features ─────────────────────────
+numpy>=1.26.0           # vetorização de cálculos de features
+
+# ── Configuração ──────────────────────────────────
+pyyaml>=6.0.1           # leitura do engine.yaml
+python-dotenv>=1.0.0    # carrega .env automaticamente (credenciais)
+
+# ── Logging ───────────────────────────────────────
+structlog>=24.0.0       # logging estruturado (JSON)
+
+# ── Dashboard web ─────────────────────────────────
+fastapi>=0.110.0        # API HTTP + WebSocket para o dashboard
+uvicorn[standard]>=0.29.0  # [standard] inclui 'websockets' — obrigatório para o endpoint /ws
+
+# ── Monitoramento / Alertas ───────────────────────
+python-telegram-bot>=21.0  # alertas Telegram (Monitoramento — futuro)

@@ -1,0 +1,39 @@
+# Credenciais — NUNCA commitar
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Ambiente virtual
+venv/
+.venv/
+env/
+
+# Dados e logs
+*.db
+*.sqlite
+*.sqlite3
+logs/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Arquivos locais / Windows
+run_dryrun.ps1
+*.BACKUP_*.db
+*_backup.db
+
+# Arquivos de teste e temporários
+teste1.txt

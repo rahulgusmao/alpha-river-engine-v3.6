@@ -1,0 +1,148 @@
+# Alpha River Engine — Mainnet Dry Run
+# Dados reais de mainnet Binance, ordens 100% simuladas localmente.
+#
+# Uso:
+#   CONFIG=config/mainnet_dryrun.yaml python main.py
+#
+# Nenhuma credencial necessária:
+#   - Dados de mercado (klines, OI, LSR, WS) são endpoints públicos
+#   - Nenhuma ordem é enviada à Binance (dry_run: true)
+#   - O campo execution_rest_url é ignorado em dry_run
+
+# ─────────────────────────────────────────────
+# REDE — mainnet (dados públicos, sem auth)
+# ─────────────────────────────────────────────
+network:
+  market_data_ws_url:   "wss://fstream.binance.com"
+  market_data_rest_url: "https://fapi.binance.com"
+  execution_rest_url:   "https://fapi.binance.com"   # irrelevante em dry_run
+  use_testnet_execution: false
+
+# ─────────────────────────────────────────────
+# DADOS
+# ─────────────────────────────────────────────
+data:
+  kline_interval: "15m"
+  history_candles: 700
+  oi_lsr_semaphore: 50
+  btcd_poll_interval_sec: 300
+
+# ─────────────────────────────────────────────
+# UNIVERSO
+# ─────────────────────────────────────────────
+universe:
+  quote_asset: "USDT"
+  contract_type: "PERPETUAL"
+
+# ─────────────────────────────────────────────
+# SINAL — idêntico ao engine.yaml canônico
+# ─────────────────────────────────────────────
+signal:
+  score_threshold: 0.40
+  rsi_secondary_threshold: 30
+  zvol_secondary_threshold: 1.5
+
+  weights_tier12:
+    zvol: 0.40
+    cvd:  0.40
+    lsr:  0.10
+    adx:  0.10
+
+  weights_tier3:
+    zvol: 0.34
+    cvd:  0.22
+    lsr:  0.07
+    adx:  0.07
+    kal:  0.30
+
+  kalman_r2_threshold: 0.30
+  kalman_r2_window: 500
+
+  oi_multipliers:
+    LONG_BUILD:  1.5
+    NEUTRO:      1.0
+    SHORT_BUILD: 0.8
+    DELEV:       0.5
+
+# ─────────────────────────────────────────────
+# EXECUÇÃO — DRY RUN (sem ordens reais)
+# ─────────────────────────────────────────────
+execution:
+  dry_run: true           # ← chave principal: ordens 100% simuladas
+  leverage: 3
+  margin_type: "ISOLATED"
+  balance_poll_interval_sec: 60   # irrelevante em dry_run
+  max_open_positions: 200         # sem cap prático dado capital de $10k
+  # v3.6: comissão bilateral estimada deduzida do PnL (0.04% taker × 2 lados)
+  commission_factor: 0.0008
+
+# ─────────────────────────────────────────────
+# RISCO
+# ─────────────────────────────────────────────
+risk:
+  risk_per_trade_pct: 0.01          # 1% por trade (conservador para calibração)
+  leverage: 3
+  initial_capital_usdt: 10000.0    # capital simulado inicial em USDT
+
+  # v3.5: trailing recalibrado via grid search Jan-Fev 2026 (25 combos)
+  # PF melhora de 0.837→0.870, PnL de -$6.325→-$4.947 no período histórico
+  trailing_activation_ratio: 1.002    # +0.2% (era 1.003 / +0.3%)
+  trailing_capture_ratio: 0.90        # 90% do peak (era 0.80)
+  sl_atr_multiplier: 2.0
+  max_hold_candles: 8                # v3.6 — MH=8 (era 20); decay exponencial pós-c4
+  delev_size_multiplier: 0.5
+
+  # ── v3.3: SL Time-Decay ───────────────────────────────────────────────────
+  sl_decay_phase1_candles: 4
+  sl_decay_phase2_candles: 16
+  sl_decay_mult_phase1: 2.0
+  sl_decay_mult_phase2: 1.7
+  sl_decay_mult_phase3: 0.8
+
+  # ── v3.3: Flow Circuit Breaker ────────────────────────────────────────────
+  # v3.5: DESATIVADO — Breakeven c8 absorve 38% dos trades antes do CB disparar.
+  # Grid search (85 combos): CB disparou em 0.08% dos trades com BE ativo.
+  flow_cb_enabled: false
+  flow_cb_cvd_threshold: -0.95       # threshold calibrado (inativo)
+  flow_cb_streak_candles: 4          # streak calibrado (inativo)
+
+  # ── v3.3: D2 ATR Filter ───────────────────────────────────────────────────
+  d2_atr_entry_max_ratio: 0.30
+
+  # ── v3.6: Breakeven Stop ──────────────────────────────────────────────────
+  # Trigger c4 (era c8). 100% dos winners via trailing fecham em ≤ 4 candles.
+  # Cap de loss 0.50% limita perda entre c4 e c8. Simulação: +1.127 USDT.
+  breakeven_trigger_candles: 4         # v3.6: era 8
+  breakeven_loss_cap_pct: 0.50         # v3.6: novo — % max de loss abaixo do entry
+
+# ─────────────────────────────────────────────
+# KILL SWITCH
+# ─────────────────────────────────────────────
+kill_switch:
+  btcd_drop_pct: 3.0
+  btcd_lookback_hours: 4
+  portfolio_drawdown_pct: 0.10
+  cooldown_hours: 4
+
+# ─────────────────────────────────────────────
+# MONITORAMENTO
+# ─────────────────────────────────────────────
+monitoring:
+  log_level: "INFO"
+  telegram_enabled: false
+  telegram_token: ""
+  telegram_chat_id: ""
+
+# ─────────────────────────────────────────────
+# DASHBOARD WEB
+# ─────────────────────────────────────────────
+dashboard:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8080
+
+# ─────────────────────────────────────────────
+# STATE
+# ─────────────────────────────────────────────
+state:
+  db_path: "alpha_river_dryrun.db"   # banco separado do testnet
