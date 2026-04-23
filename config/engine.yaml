@@ -1,0 +1,229 @@
+# Alpha River Engine — Configuração Canônica v1.3 (v3.6)
+# Baseado no framework v3.3: SL Time-Decay + Blacklist + Flow Circuit Breaker
+
+# ─────────────────────────────────────────────────
+# REDE
+# ─────────────────────────────────────────────────
+network:
+  # WebSocket de dados de mercado (produção — testnet não tem WS próprio)
+  market_data_ws_url: "wss://fstream.binance.com"
+
+  # REST de dados de mercado (produção)
+  market_data_rest_url: "https://fapi.binance.com"
+
+  # REST de EXECUÇÃO de ordens — TESTNET (sem capital real)
+  execution_rest_url: "https://testnet.binancefuture.com"
+  use_testnet_execution: true   # flag de segurança — nunca false em dev
+
+# ─────────────────────────────────────────────────
+# DADOS
+# ─────────────────────────────────────────────────
+data:
+  kline_interval: "15m"
+
+  # Candles históricos para warm-up de rolling windows
+  # Mínimo: 500 (critério R² do Kalman Tier3)
+  # Recomendado: 700 (margem de segurança)
+  history_candles: 700
+
+  # Máximo de requests REST simultâneos (semáforo do BinanceRestClient)
+  # Limite Binance: 1200 peso/min. Com 50 concorrentes e peso médio ~1: seguro.
+  oi_lsr_semaphore: 50
+
+  # Intervalo de polling do BTC Dominance (CoinGecko Free Tier: 30 req/min)
+  btcd_poll_interval_sec: 300
+
+# ─────────────────────────────────────────────────
+# UNIVERSO DE TOKENS
+# ─────────────────────────────────────────────────
+universe:
+  quote_asset: "USDT"
+  contract_type: "PERPETUAL"
+  # Universo total: todos os pares USDT-M perpétuos com status TRADING
+
+# ─────────────────────────────────────────────────
+# SINAL — Framework v3.2 Golden Final
+# ─────────────────────────────────────────────────
+signal:
+  score_threshold: 0.40               # gatilho primário
+  rsi_secondary_threshold: 30         # gatilho secundário (RSI oversold)
+  zvol_secondary_threshold: 1.5       # gatilho secundário (z-vol em σ)
+
+  # Pesos Tier 1 e 2
+  weights_tier12:
+    zvol: 0.40
+    cvd:  0.40
+    lsr:  0.10
+    adx:  0.10
+
+  # Pesos Tier 3 (com Kalman)
+  weights_tier3:
+    zvol: 0.34
+    cvd:  0.22
+    lsr:  0.07
+    adx:  0.07
+    kal:  0.30
+
+  # ── v4.0: Kalman por Tier (AF 13.3 / P33 / P34) ──────────────────────────
+  # Tier 1/2: Kalman DESATIVADO (R² alto c/ BTC → Alpha é ruído).
+  # Tier 3:   Kalman ATIVO com peso dinâmico via R².
+  #
+  # Critério P34 de elegibilidade (Tier 3):
+  #   R² < kalman_r2_full_below  → peso máximo (kalman_max_weight)
+  #   R² > kalman_r2_zero_above  → peso zero (Kalman ignorado)
+  #   faixa intermediária        → interpolação linear
+  kalman_r2_full_below: 0.25          # era: kalman_r2_threshold=0.30 (P34 revisado)
+  kalman_r2_zero_above: 0.35          # acima disto: Kalman sem edge
+  kalman_max_weight: 0.20             # peso máximo Kalman no score (AF 13.3: ≤ 0.20)
+  kalman_r2_window: 500               # candles para rolling R²
+
+  # Multiplicadores OI por regime
+  oi_multipliers:
+    LONG_BUILD:  1.5
+    NEUTRO:      1.0
+    SHORT_BUILD: 0.8
+    DELEV:       0.5
+
+# ─────────────────────────────────────────────────
+# EXECUÇÃO — Binance Futures Testnet
+# ─────────────────────────────────────────────────
+execution:
+  # Modo dry_run: dados reais de mainnet, ordens 100% simuladas localmente.
+  # false → ordens reais enviadas para execution_rest_url (testnet ou mainnet)
+  # true  → nenhuma ordem enviada; use config/mainnet_dryrun.yaml para ativar
+  dry_run: false
+
+  # Alavancagem aplicada por símbolo antes da primeira ordem
+  leverage: 3
+
+  # Tipo de margem: ISOLATED (recomendado em paper trading)
+  margin_type: "ISOLATED"
+
+  # Intervalo de polling do saldo da conta testnet (segundos)
+  balance_poll_interval_sec: 10
+
+  # v3.6: fator de comissão bilateral estimada (entrada + saída)
+  # 0.0008 = 0.04% taker × 2 lados. Deduzido do PnL a cada fechamento.
+  # Ajustar se usar maker orders ou BNB discount.
+  commission_factor: 0.0008
+
+  # Credenciais VIA VARIÁVEIS DE AMBIENTE — nunca colocar aqui
+  # export BINANCE_TESTNET_API_KEY="sua_api_key_do_testnet"
+  # export BINANCE_TESTNET_API_SECRET="seu_api_secret_do_testnet"
+  # Obtenha em: https://testnet.binancefuture.com → API Management
+
+# ─────────────────────────────────────────────────
+# RISCO — Fase inicial (testnet / paper trading)
+# ─────────────────────────────────────────────────
+risk:
+  risk_per_trade_pct: 0.01            # 1% do portfólio por trade (conservador)
+  leverage: 3                         # alavancagem inicial — calibrar em paper
+  initial_capital_usdt: 5000.0        # saldo real do testnet — usado como fallback se balance fetch falhar
+
+  # Trailing Stop (gain-based)
+  # v3.5: activation baixada de 1.003→1.002 (+0.3%→+0.2%) para capturar mais trades
+  # v3.5: capture aumentado de 0.80→0.90 para reduzir devolução de lucro
+  # Grid search Jan-Fev 2026 (25 combos): PF 0.837→0.870, PnL -$6.325→-$4.947
+  trailing_activation_ratio: 1.002    # ativa quando peak/entry >= 1.002 (+0.2%)
+  trailing_capture_ratio: 0.90        # stop = entry + 0.90 × (peak - entry)
+
+  # Stop Loss inicial
+  sl_atr_multiplier: 2.0              # SL = entry - 2 × ATR(14)
+
+  # MaxHold: fecha posição após N candles sem atingir SL ou trailing
+  # v4.0 — MH=20 (P37 Rev. grid search validou ótimo em 20c; degradação acima).
+  # v3.6 — MH=8 (era 20 em v3.3). Ajustado via grid sweep com MFE gates ativos.
+  # Combinado com BE c4 + MFE Gate (Q4.1), trades ruins saem cedo, bons correm até c9.
+  max_hold_candles: 20                # 20 candles × 15m = 5 horas
+
+  # DELEV sizing: reduz exposição pela metade em regime de desalavancagem
+  delev_size_multiplier: 0.5
+
+  # ── v3.3: SL Time-Decay ────────────────────────────────────────────────────
+  # SL evolui em 3 fases usando entry_atr (ATR fixo no momento da entrada).
+  # Fase 1: candles 0-4   → multiplier 2.0 × entry_atr  (SL amplo, sem apertar)
+  # Fase 2: candles 5-16  → multiplier 1.7 × entry_atr  (proteção moderada)
+  # Fase 3: candles 17+   → multiplier 0.8 × entry_atr  (aperta SL, evita MaxHold)
+  sl_decay_phase1_candles: 4
+  sl_decay_phase2_candles: 16
+  sl_decay_mult_phase1: 2.0
+  sl_decay_mult_phase2: 1.7
+  sl_decay_mult_phase3: 0.8
+
+  # ── v3.3: Flow Circuit Breaker ─────────────────────────────────────────────
+  # v3.5: DESATIVADO — grid search comprovou que Breakeven c8 absorve o papel
+  # do FLOW_CB. Com Breakeven ativo, o FLOW_CB disparou em apenas 0.08% dos
+  # trades (85 combos testadas). Manter ativo apenas piora avg_loss.
+  # Para reativar: alterar flow_cb_enabled para true e ajustar threshold/streak.
+  flow_cb_enabled: false
+  flow_cb_cvd_threshold: -0.95       # threshold calibrado (inativo)
+  flow_cb_streak_candles: 4          # streak calibrado (inativo)
+
+  # ── v3.3: D2 ATR Filter ────────────────────────────────────────────────────
+  # Rejeita entrada se ATR/entry_price > threshold (símbolo de alta volatilidade)
+  d2_atr_entry_max_ratio: 0.30        # ATR/entry > 30% → sem entrada
+
+  # ── v4.0: SHORT_BUILD Gate (P77) ───────────────────────────────────────────
+  # Bloqueia entrada quando OI regime = SHORT_BUILD.
+  # Evidência backtest: único regime com WR<50% e avg_net=-0.35%.
+  # SHORT_BUILD = OI↑ + preço↓ = capital novo alocado CONTRA a posição Long.
+  block_short_build: true
+
+  # ── v3.6 / v4.0: Breakeven Stop ────────────────────────────────────────────
+  # Trigger: candle 4. Grid search live (7.142 trades, Abr/2026):
+  # 100% dos winners via TRAILING fecham em ≤ 4 candles.
+  #
+  # v4.0 (Q4.1): MFE Gate adicionado. Lógica seletiva:
+  #   c3 (pré-BE): MFE<0.05% + cvd_n<-0.5 → exit antecipada (trade estruturalmente ruim)
+  #   c4+:         MFE>0.50% + cvd_n>0    → allow runoff (não forçar BE — regime institucional)
+  #   c4+:         MFE<=0.50%             → lógica BE padrão (SL=entry + cap)
+  #
+  # Simulação sobre dados reais: P&L +42 USDT → +1.127 USDT (BE) + ~1.0k (MFE gate)
+  breakeven_trigger_candles: 4
+  breakeven_loss_cap_pct: 0.50
+
+  # ── v4.0: MFE Gate (Q4.1) ──────────────────────────────────────────────────
+  # Seletividade baseada em Max Favorable Excursion — 57% dos breakevens têm MFE=0.
+  # Gate de saída antecipada (c3): trade nunca subiu + fluxo deteriorado → exit.
+  # Gate de runoff (c4+): trade com ganho real + OI/CVD confirmando → deixar correr.
+  mfe_exit_threshold_pct: 0.05        # MFE abaixo → candidato a exit antecipada
+  mfe_exit_cvd_threshold: -0.5        # cvd_n mínimo para confirmar saída (zscore norm)
+  mfe_runoff_threshold_pct: 0.50      # MFE acima → candidato a runoff (não fechar no BE)
+  mfe_runoff_cvd_min: 0.0             # cvd_n mínimo para confirmar runoff
+
+# ─────────────────────────────────────────────────
+# KILL SWITCH
+# ─────────────────────────────────────────────────
+kill_switch:
+  # Ativado se BTC.D cair X% em Y horas
+  btcd_drop_pct: 3.0
+  btcd_lookback_hours: 4
+
+  # Ativado se drawdown do portfólio ultrapassar Z% desde o pico
+  portfolio_drawdown_pct: 0.10        # 10% de drawdown máximo
+
+  # Cooldown após ativação: bloqueia novas entradas por N horas
+  cooldown_hours: 4
+
+# ─────────────────────────────────────────────────
+# MONITORAMENTO
+# ─────────────────────────────────────────────────
+monitoring:
+  log_level: "INFO"                   # DEBUG em dev, INFO em produção
+  telegram_enabled: false
+  telegram_token: ""
+  telegram_chat_id: ""
+
+# ─────────────────────────────────────────────
+# DASHBOARD WEB
+# ─────────────────────────────────────────────
+dashboard:
+  enabled: true
+  host: "0.0.0.0"       # 0.0.0.0 = acessível de qualquer IP da rede local
+  port: 8080            # http://localhost:8080
+
+# ─────────────────────────────────────────────
+# STATE
+# ─────────────────────────────────────────────
+state:
+  db_path: "alpha_river_state.db"
