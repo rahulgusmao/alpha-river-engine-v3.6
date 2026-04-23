@@ -5,12 +5,12 @@ Pipeline completo (5 engines):
   DataLayer → fanout → FeatureEngine → SignalEngine → RiskManager → ExecutionEngine
 
 Modos de operação:
-  testnet  (padrão)    : config/engine.yaml, execução no testnet Binance
-  dry_run  (mainnet)   : config/mainnet_dryrun.yaml, dados reais, ordens simuladas
+  dry_run  (padrão)    : config/mainnet_dryrun.yaml, dados reais, ordens simuladas
+  testnet              : config/engine.yaml, execução no testnet Binance
 
 Seleção de config:
-  python main.py                           → config/engine.yaml
-  CONFIG=config/mainnet_dryrun.yaml python main.py  → dry_run com mainnet
+  python main.py                           → config/mainnet_dryrun.yaml (padrão)
+  CONFIG=config/engine.yaml python main.py → testnet Binance
 
 Fases de inicialização:
   1. Warm-up histórico (REST) → inicializa calculators de todos os símbolos
@@ -74,7 +74,7 @@ logger = structlog.get_logger(__name__)
 
 def load_config() -> dict:
     # Permite selecionar config via variável de ambiente CONFIG=caminho/para/arquivo.yaml
-    config_path = Path(os.environ.get("CONFIG", "config/engine.yaml"))
+    config_path = Path(os.environ.get("CONFIG", "config/mainnet_dryrun.yaml"))
     if not config_path.is_absolute():
         config_path = Path(__file__).parent / config_path
 
