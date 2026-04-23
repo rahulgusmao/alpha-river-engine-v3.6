@@ -56,47 +56,62 @@ class BTCDFetcher:
         self._poll_interval = poll_interval_sec
         self._latest: Optional[RawBTCD] = None
         self._running = False
+        self._session: Optional[aiohttp.ClientSession] = None
 
     @property
     def latest(self) -> Optional[RawBTCD]:
         """Último valor de BTC.D disponível. Pode ser None antes do primeiro poll."""
         return self._latest
 
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """Retorna sessão HTTP reutilizável (cria se necessário)."""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=15)
+            )
+        return self._session
+
+    async def _close_session(self) -> None:
+        """Fecha a sessão HTTP se estiver aberta."""
+        if self._session and not self._session.closed:
+            await self._session.close()
+            self._session = None
+
     async def _fetch_once(self) -> Optional[RawBTCD]:
         """Executa um request à CoinGecko e retorna RawBTCD."""
         try:
-            async with aiohttp.ClientSession(
-                timeout=aiohttp.ClientTimeout(total=15)
-            ) as session:
-                async with session.get(_COINGECKO_URL) as resp:
-                    if resp.status != 200:
-                        logger.warning(
-                            "btcd_http_error",
-                            status=resp.status,
-                            url=_COINGECKO_URL,
-                        )
-                        return None
-
-                    data = await resp.json()
-                    btc_pct = (
-                        data.get("data", {})
-                        .get("market_cap_percentage", {})
-                        .get("btc")
+            session = await self._get_session()
+            async with session.get(_COINGECKO_URL) as resp:
+                if resp.status != 200:
+                    logger.warning(
+                        "btcd_http_error",
+                        status=resp.status,
+                        url=_COINGECKO_URL,
                     )
-                    if btc_pct is None:
-                        logger.warning("btcd_field_missing", data_keys=list(data.keys()))
-                        return None
+                    return None
 
-                    return RawBTCD(
-                        ts=int(time.time() * 1000),
-                        btc_dominance=float(btc_pct),
-                    )
+                data = await resp.json()
+                btc_pct = (
+                    data.get("data", {})
+                    .get("market_cap_percentage", {})
+                    .get("btc")
+                )
+                if btc_pct is None:
+                    logger.warning("btcd_field_missing", data_keys=list(data.keys()))
+                    return None
+
+                return RawBTCD(
+                    ts=int(time.time() * 1000),
+                    btc_dominance=float(btc_pct),
+                )
 
         except asyncio.TimeoutError:
             logger.warning("btcd_timeout", url=_COINGECKO_URL)
             return None
         except aiohttp.ClientError as exc:
             logger.warning("btcd_client_error", error=str(exc))
+            # Sessão pode estar corrompida após erro de rede — fechar para recriar
+            await self._close_session()
             return None
         except Exception as exc:
             logger.error("btcd_unexpected_error", error=str(exc))
@@ -131,6 +146,7 @@ class BTCDFetcher:
             except asyncio.CancelledError:
                 break
 
+        await self._close_session()
         logger.info("btcd_fetcher_stopped")
 
     def stop(self) -> None:

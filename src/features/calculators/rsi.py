@@ -107,6 +107,8 @@ class RSICalculator:
         st.avg_gain = (st.avg_gain * (self._period - 1) + gain) / self._period
         st.avg_loss = (st.avg_loss * (self._period - 1) + loss) / self._period
 
+        if st.avg_loss < _EPSILON and st.avg_gain < _EPSILON:
+            return 50.0  # sem movimento → neutro
         if st.avg_loss < _EPSILON:
             return 100.0
         if st.avg_gain < _EPSILON:

@@ -129,15 +129,21 @@ class RiskManager:
         # D2 ATR Filter: ATR/entry_price > threshold → rejeitar entrada
         self._d2_atr_max_ratio: float = cfg_risk.get("d2_atr_entry_max_ratio", 0.30)
 
+        # v4.0 — SHORT_BUILD Gate (P77)
+        # SHORT_BUILD = OI↑ + preço↓: capital novo alocado contra a posição Long.
+        # Backtest: único regime com WR<50% e avg_net=-0.35%.
+        self._block_short_build: bool = cfg_risk.get("block_short_build", True)
+
         # Fila de saída para o ExecutionEngine
         self._output_queue: asyncio.Queue = asyncio.Queue(maxsize=2_000)
 
         # Contadores
-        self._signals_received    = 0
-        self._orders_generated    = 0
-        self._signals_blocked     = 0
-        self._signals_blacklisted = 0
-        self._signals_d2_filtered = 0
+        self._signals_received          = 0
+        self._orders_generated          = 0
+        self._signals_blocked           = 0
+        self._signals_blacklisted       = 0
+        self._signals_d2_filtered       = 0
+        self._signals_short_build_blocked = 0   # v4.0
 
     # ──────────────────────────── NOVA ENTRADA ─────────────────────────────
 
@@ -195,7 +201,19 @@ class RiskManager:
                 )
                 return None
 
-        # 4. Position sizing
+        # 4. v4.0 — SHORT_BUILD Gate (P77)
+        # Capital institucional entrando contra a posição Long: WR<50%, avg=-0.35%.
+        if self._block_short_build and signal.oi_regime == "SHORT_BUILD":
+            self._signals_short_build_blocked += 1
+            logger.info(
+                "signal_blocked_short_build",
+                symbol=signal.symbol,
+                oi_regime=signal.oi_regime,
+                score=round(signal.score, 4),
+            )
+            return None
+
+        # 5. Position sizing
         qty, position_usdt = self._sizer.compute(
             portfolio_value=portfolio_value,
             entry_price=signal.entry_price,
@@ -211,13 +229,13 @@ class RiskManager:
             )
             return None
 
-        # 5. Stop Loss inicial
+        # 6. Stop Loss inicial
         sl_price = self._sl_calc.compute(
             entry_price=signal.entry_price,
             atr14=signal.atr14,
         )
 
-        # 6. Monta OrderSpec (com entry_atr para o SL Decay — v3.3)
+        # 7. Monta OrderSpec (com entry_atr para o SL Decay — v3.3)
         spec = OrderSpec(
             symbol=signal.symbol,
             side="BUY",
@@ -325,55 +343,93 @@ class RiskManager:
                     )
                     continue  # não verifica demais se vai fechar
 
-            # ── 2. Breakeven Stop (v3.6) ──────────────────────────────────────
+            # ── 2. Breakeven Stop + MFE Gates (v3.6 / v4.0) ──────────────────
+            sym_features = features_by_symbol.get(pos.symbol, {})
+            cvd_n = sym_features.get("cvd_n", 0.0) or 0.0
+
+            # ── 2a. v4.0 MFE Gate — exit antecipada (Q4.1) ───────────────────
+            # c3: se trade nunca subiu (MFE~0) + fluxo deteriorado → fecha antes do BE c4.
+            # Evita esperar o BE automático: capital em trade morto tem custo de oportunidade.
+            if self._breakeven.check_mfe_exit(
+                entry_price=pos.entry_price,
+                peak_price=pos.peak,
+                current_close=current_close,
+                cvd_n=cvd_n,
+                candles_open=pos.candles_open,
+            ):
+                instructions.append(CloseInstruction(
+                    position_id=pos.position_id,
+                    symbol=pos.symbol,
+                    reason=CloseReason.BREAKEVEN_MFE_EXIT,
+                    close_price=current_close,
+                ))
+                logger.info(
+                    "position_close_mfe_exit",
+                    symbol=pos.symbol,
+                    candles_open=pos.candles_open,
+                    entry=pos.entry_price,
+                    peak=pos.peak,
+                    close=current_close,
+                    cvd_n=round(cvd_n, 3),
+                    pnl_pct=round((current_close - pos.entry_price) / pos.entry_price * 100, 4),
+                )
+                continue
+
+            # ── 2b. v4.0 MFE Gate — runoff (Q4.1) ────────────────────────────
+            # c4+: se trade ganhou tração real (MFE>0.50%) + fluxo comprador ativo
+            # → não aplicar BE padrão (regime institucional, deixar trailing correr).
+            mfe_runoff = self._breakeven.check_mfe_runoff(
+                entry_price=pos.entry_price,
+                peak_price=pos.peak,
+                cvd_n=cvd_n,
+                candles_open=pos.candles_open,
+                trailing_active=pos.trailing_active,
+            )
+
+            # ── 2c. BE padrão (v3.6) — somente se runoff não ativo ──────────
             # A partir do candle 4 sem trailing ativo:
             #   - SL move para entry_price (proteção zero-loss)
             #   - Cap de loss 0.50%: se close <= entry × 0.995 → fecha (BREAKEVEN)
             #   - Se close > entry: SL protege no entry, trade continua
-            # Flag breakeven_active sinaliza que o SL já está no entry (idempotente).
-            new_be_sl, be_triggered = self._breakeven.check(
-                entry_price=pos.entry_price,
-                sl_price=pos.sl_price,
-                candles_open=pos.candles_open,
-                trailing_active=pos.trailing_active,
-                current_close=current_close,
-            )
-            # Atualiza SL se breakeven moveu para entry (e marca flag idempotente)
-            if new_be_sl > pos.sl_price:
-                pos.sl_price = new_be_sl
-                if not pos.breakeven_active:
-                    pos.breakeven_active = True
-
-            if be_triggered:
-                # close_price: o real preço de saída (pode ser o cap_floor se
-                # o cap de loss disparou, ou current_close se SL no entry foi tocado)
-                be_close = current_close
-                instructions.append(CloseInstruction(
-                    position_id=pos.position_id,
-                    symbol=pos.symbol,
-                    reason=CloseReason.BREAKEVEN,
-                    close_price=be_close,
-                ))
-                logger.info(
-                    "position_close_breakeven",
-                    symbol=pos.symbol,
+            if not mfe_runoff:
+                new_be_sl, be_triggered = self._breakeven.check(
+                    entry_price=pos.entry_price,
+                    sl_price=pos.sl_price,
                     candles_open=pos.candles_open,
-                    entry=pos.entry_price,
-                    close=be_close,
-                    sl_at_entry=round(pos.sl_price, 6),
-                    cap_pct=self._breakeven.cfg.loss_cap_pct,
-                    pnl_pct=round((be_close - pos.entry_price) / pos.entry_price * 100, 4),
+                    trailing_active=pos.trailing_active,
+                    current_close=current_close,
                 )
-                continue
+                # Atualiza SL se breakeven moveu para entry (flag idempotente)
+                if new_be_sl > pos.sl_price:
+                    pos.sl_price = new_be_sl
+                    if not pos.breakeven_active:
+                        pos.breakeven_active = True
+
+                if be_triggered:
+                    instructions.append(CloseInstruction(
+                        position_id=pos.position_id,
+                        symbol=pos.symbol,
+                        reason=CloseReason.BREAKEVEN,
+                        close_price=current_close,
+                    ))
+                    logger.info(
+                        "position_close_breakeven",
+                        symbol=pos.symbol,
+                        candles_open=pos.candles_open,
+                        entry=pos.entry_price,
+                        close=current_close,
+                        sl_at_entry=round(pos.sl_price, 6),
+                        cap_pct=self._breakeven.cfg.loss_cap_pct,
+                        pnl_pct=round((current_close - pos.entry_price) / pos.entry_price * 100, 4),
+                    )
+                    continue
 
             # ── 3. Flow Circuit Breaker (v3.3 — DESATIVADO em v3.5) ──────────
-            # Evidência empírica: com Breakeven c8 ativo, o CB disparou em apenas
+            # Evidência empírica: com Breakeven c4 ativo, o CB disparou em apenas
             # 0.08% dos 77k trades do backtest Jan-Fev 2026 (85 combos testados).
             # O Breakeven absorve os trades deteriorados antes que o streak CVD
             # negativo se forme. Manter ativo piora avg_loss sem benefício.
-            sym_features = features_by_symbol.get(pos.symbol, {})
-            cvd_n = sym_features.get("cvd_n")
-
+            # Nota: cvd_n já resolvido no bloco 2 (MFE Gate) acima.
             if self._flow_cb_enabled and cvd_n is not None:
                 new_streak, flow_triggered = self._flow_cb.check(
                     cvd_n=cvd_n,

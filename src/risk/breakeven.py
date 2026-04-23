@@ -1,92 +1,212 @@
 """
 src/risk/breakeven.py
-Breakeven Stop — Alpha River v3.6
+Breakeven Stop + MFE Gate — Alpha River v4.0
 
-Motivação (v3.6 — 2026-04-13):
-  Análise do snapshot live (7.142 trades, 11-13/Abr/2026) revelou que:
-  - 100% dos trades vencedores via TRAILING fecham em ≤ 4 candles.
-  - Trades que ultrapassam o candle 4 sem trailing ativo são zumbis estatísticos:
-    avg_loss=-1.12%, P&L total=-1.724 USDT (34.9% dos trades fechados).
-  - Segurar posições além de 8 candles é exponencialmente prejudicial — cada
-    candle adicional aumenta o loss esperado sem incremento proporcional de WR.
-  - O mecanismo v3.4 (trigger c8) fechava trades como "BREAKEVEN" com losses
-    reais de -8% a -11%, pois o preço já estava muito abaixo do entry no momento
-    do trigger. O SL nunca chegava ao entry antes do fechamento.
+──────────────────────────────────────────────────────────────────────────────
+Histórico de versões
+──────────────────────────────────────────────────────────────────────────────
+v3.6 (2026-04-13):
+  Motivação: análise snapshot live (7.142 trades, 11-13/Abr/2026):
+    - 100% dos winners via TRAILING fecham em ≤ 4 candles.
+    - Trades pós-c4 sem trailing são zumbis: avg_loss=-1.12%, total=-1.724 USDT.
+    - O mecanismo anterior (trigger c8) fechava com losses reais de -8% a -11%.
+  Grid search (2.604 trades afetados):
+    Cap 0.50% → P&L simulado: +1.127 USDT (ótimo).
+  Nova lógica: trigger c4, SL=entry, cap de loss 0.50%.
 
-  Grid search sobre os dados reais (2.604 trades afetados):
-    Cap 0.25% → P&L simulado: +1.417 USDT (muito apertado, risco de falsos disparos)
-    Cap 0.50% → P&L simulado: +1.127 USDT (ótimo: ~4.9 candles para atingir cap)
-    Cap 0.75% → P&L simulado: +899 USDT
-    Cap 1.00% → P&L simulado: +724 USDT
-  Cap 0.50% selecionado: alinhado com a janela c4→c8, robusto nos 3 dias testados.
+v4.0 (2026-04-15) — MFE Gate (Q4.1):
+  Motivação: backtest P37 Rev. revelou dois problemas opostos:
+    1. 57% dos trades breakeven têm MFE=0 desde c1 — nunca subiram.
+       São trades estruturalmente ruins que deveriam fechar ANTES do BE c4.
+       Desperdiçam capital e aumentam slippage acumulado.
+    2. 12.9% dos trades chegam ao regime c6-c9 com WR~100% e PnL 5-10× maior,
+       mas são mortos pelo BE c4 indiscriminado — Alpha institucional perdido.
 
-Nova lógica (v3.6):
-  Trigger: candle 4 (era 8)
-  Ao atingir o trigger (candles_open >= 4, trailing_active=False):
-    1. SL é movido para entry_price (proteção zero-loss)
-    2. Cap de loss ativado: se current_close <= entry_price × (1 - cap_pct):
-       → Fecha IMEDIATAMENTE (BREAKEVEN) — evita loss ilimitado
-    3. Se current_close está entre (entry - cap) e entry:
-       → SL está no entry, trade continua aguardando recuperação ou trailing
-    4. Se current_close > entry:
-       → SL protege no entry, trade pode ativar trailing normalmente
-  Candles 5-7: cap continua ativo (fecha se close <= entry - cap%)
-  Candle 8: MAX_HOLD fecha qualquer posição ainda aberta (independente do estado)
+  Solução: dois gates seletivos complementares ao BE padrão:
 
-Resultado esperado (simulação sobre 55h de dados reais):
-  P&L total: +42 USDT → +1.127 USDT (+2.551%)
-  Trades salvos do loss ilimitado: 1.657 de 2.604 (63.6%)
+  Gate 1 — Exit Antecipada (c3, ANTES do BE):
+    Condição: MFE_pct < 0.05% AND cvd_n < -0.50
+    Ação: fechar posição imediatamente (BREAKEVEN_MFE_EXIT)
+    Lógica: trade nunca subiu + fluxo se deteriorando → sair antes de perder mais.
+    Impacto esperado: ~57% dos futuros breakevens eliminados com loss menor.
 
-Parâmetros (configuráveis via engine.yaml):
-  breakeven_trigger_candles: 4    (era 8)
-  breakeven_loss_cap_pct:    0.50 (novo — % do entry_price)
-  max_hold_candles:          8    (era 20, controlado em max_hold.py)
+  Gate 2 — Runoff (c4+, OVERRIDE do BE padrão):
+    Condição: MFE_pct > 0.50% AND cvd_n >= 0.0
+    Ação: NÃO aplicar BE automático neste candle (deixar trailing correr)
+    Lógica: trade ganhou tração + fluxo comprador ativo → regime institucional.
+    Impacto esperado: ~12.9% dos trades capturam c6-c9 (+1.3% a +3.2%).
+
+  O BE padrão (SL=entry + cap 0.50%) permanece como fallback para todos
+  os trades que não se encaixam em nenhum dos dois gates.
+
+──────────────────────────────────────────────────────────────────────────────
+Interface pública
+──────────────────────────────────────────────────────────────────────────────
+  BreakevenConfig: dataclass de configuração (lida de engine.yaml)
+  BreakevenStop.check_mfe_exit()   → gate exit antecipada (chamar em c3)
+  BreakevenStop.check_mfe_runoff() → gate runoff (chamar em c4+ antes do BE)
+  BreakevenStop.check()            → BE padrão (chamar após os dois gates)
+
+Uso pelo RiskManager (ordem obrigatória por candle):
+  1. c == 3:  triggered, reason = be.check_mfe_exit(entry, peak, close, cvd_n)
+              se triggered → fechar (BREAKEVEN_MFE_EXIT)
+  2. c >= 4:  allow_runoff = be.check_mfe_runoff(entry, peak, close, cvd_n)
+              se allow_runoff → pular BE padrão neste candle
+  3. c >= 4:  new_sl, triggered = be.check(entry, sl, c, trailing_active, close)
+              se triggered → fechar (BREAKEVEN ou BREAKEVEN_CAP_LOSS)
 """
 
-import logging
 from dataclasses import dataclass
 
-logger = logging.getLogger(__name__)
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 
 @dataclass
 class BreakevenConfig:
-    """Configuração do Breakeven Stop. Lida de risk config no engine.yaml."""
-    trigger_candles: int   = 4     # v3.6: era 8; melhores trades resolvem em ≤ 4c
-    loss_cap_pct:    float = 0.50  # v3.6: novo — % máx de loss abaixo do entry
+    """Configuração do Breakeven Stop + MFE Gate. Lida de risk config no engine.yaml."""
+
+    # BE padrão (v3.6)
+    trigger_candles: int   = 4      # candle em que o BE ativa
+    loss_cap_pct:    float = 0.50   # % máx de loss abaixo do entry antes de fechar
+
+    # MFE Gate — exit antecipada (v4.0 Q4.1)
+    mfe_exit_threshold_pct: float = 0.05   # MFE abaixo → candidato a exit
+    mfe_exit_cvd_threshold: float = -0.50  # cvd_n abaixo → confirma exit
+
+    # MFE Gate — runoff (v4.0 Q4.1)
+    mfe_runoff_threshold_pct: float = 0.50  # MFE acima → candidato a runoff
+    mfe_runoff_cvd_min:       float = 0.00  # cvd_n acima → confirma runoff
 
     @classmethod
     def from_config(cls, risk_cfg: dict) -> "BreakevenConfig":
         return cls(
-            trigger_candles=risk_cfg.get("breakeven_trigger_candles", 4),
-            loss_cap_pct=risk_cfg.get("breakeven_loss_cap_pct", 0.50),
+            trigger_candles          = risk_cfg.get("breakeven_trigger_candles",    4),
+            loss_cap_pct             = risk_cfg.get("breakeven_loss_cap_pct",       0.50),
+            mfe_exit_threshold_pct   = risk_cfg.get("mfe_exit_threshold_pct",       0.05),
+            mfe_exit_cvd_threshold   = risk_cfg.get("mfe_exit_cvd_threshold",      -0.50),
+            mfe_runoff_threshold_pct = risk_cfg.get("mfe_runoff_threshold_pct",     0.50),
+            mfe_runoff_cvd_min       = risk_cfg.get("mfe_runoff_cvd_min",           0.00),
         )
 
 
 class BreakevenStop:
     """
-    Gerencia o Breakeven Stop para posições abertas.
+    Gerencia o Breakeven Stop e MFE Gate para posições abertas.
 
-    Stateless — o estado (sl_price, trailing_active, candles_open) vive no
-    objeto Position. Este módulo apenas decide e aplica a mutação.
-
-    Lógica v3.6 (por candle, após trigger):
-      - SL é movido para entry_price na primeira chamada após o trigger
-      - Cap de loss: se close <= entry × (1 - cap_pct/100) → fecha (BREAKEVEN)
-      - Idempotente: uma vez que sl_price >= entry_price, apenas monitora o cap
-      - Trailing ativo: breakeven não interfere (gain protegido pelo trailing)
-
-    Uso pelo RiskManager a cada candle fechado (após DecaySL, antes do Trailing):
-
-        be = BreakevenStop(config)
-        new_sl, triggered = be.check(entry_price, sl_price, candles_open,
-                                     trailing_active, current_close)
-        # new_sl:    SL atualizado (entry_price após trigger, sl_price antes)
-        # triggered: True se o trade deve fechar como BREAKEVEN agora
+    Stateless — o estado (sl_price, trailing_active, candles_open, peak_price)
+    vive no objeto Position. Este módulo apenas decide e aplica a mutação.
     """
 
     def __init__(self, config: BreakevenConfig) -> None:
         self.cfg = config
+
+    # ──────────────────────────── MFE GATE: EXIT ANTECIPADA ───────────────
+
+    def check_mfe_exit(
+        self,
+        entry_price:  float,
+        peak_price:   float,
+        current_close: float,
+        cvd_n:        float,
+        candles_open: int,
+    ) -> bool:
+        """
+        Gate de exit antecipada — v4.0 Q4.1.
+
+        Chamar no candle 3 (ANTES do BE automático no candle 4).
+        Detecta trades que nunca tiveram MFE positivo + fluxo deteriorado.
+
+        Args:
+            entry_price:   preço de entrada da posição.
+            peak_price:    maior preço desde a entrada (MFE proxy).
+            current_close: fechamento do candle atual.
+            cvd_n:         CVD normalizado do candle atual ([-1, 1]).
+            candles_open:  candles que a posição está aberta.
+
+        Returns:
+            True → fechar imediatamente (BREAKEVEN_MFE_EXIT).
+            False → não agir (prosseguir para BE padrão ou trailing).
+        """
+        if candles_open != 3:
+            return False
+
+        mfe_pct = (peak_price - entry_price) / entry_price * 100.0
+
+        triggered = (
+            mfe_pct < self.cfg.mfe_exit_threshold_pct
+            and cvd_n < self.cfg.mfe_exit_cvd_threshold
+        )
+
+        if triggered:
+            logger.info(
+                "breakeven_mfe_exit",
+                candles=candles_open,
+                entry=round(entry_price, 6),
+                peak=round(peak_price, 6),
+                mfe_pct=round(mfe_pct, 4),
+                cvd_n=round(cvd_n, 4),
+            )
+
+        return triggered
+
+    # ──────────────────────────── MFE GATE: RUNOFF ────────────────────────
+
+    def check_mfe_runoff(
+        self,
+        entry_price:  float,
+        peak_price:   float,
+        cvd_n:        float,
+        candles_open: int,
+        trailing_active: bool,
+    ) -> bool:
+        """
+        Gate de runoff — v4.0 Q4.1.
+
+        Chamar no candle 4+ ANTES do BE padrão.
+        Detecta trades com tração real + fluxo comprador ativo.
+        Se True, o BE padrão NÃO deve ser aplicado neste candle.
+
+        Args:
+            entry_price:     preço de entrada da posição.
+            peak_price:      maior preço desde a entrada (MFE proxy).
+            cvd_n:           CVD normalizado do candle atual.
+            candles_open:    candles que a posição está aberta.
+            trailing_active: se True, trailing já está gerenciando — runoff irrelevante.
+
+        Returns:
+            True → NÃO aplicar BE padrão neste candle (deixar trailing correr).
+            False → prosseguir para BE padrão normalmente.
+        """
+        # Trailing ativo já protege o ganho — runoff é irrelevante
+        if trailing_active:
+            return False
+
+        if candles_open < self.cfg.trigger_candles:
+            return False
+
+        mfe_pct = (peak_price - entry_price) / entry_price * 100.0
+
+        allow = (
+            mfe_pct > self.cfg.mfe_runoff_threshold_pct
+            and cvd_n >= self.cfg.mfe_runoff_cvd_min
+        )
+
+        if allow:
+            logger.info(
+                "breakeven_mfe_runoff",
+                candles=candles_open,
+                entry=round(entry_price, 6),
+                peak=round(peak_price, 6),
+                mfe_pct=round(mfe_pct, 4),
+                cvd_n=round(cvd_n, 4),
+                hint="BE padrão ignorado",
+            )
+
+        return allow
+
+    # ──────────────────────────── BE PADRÃO (v3.6) ────────────────────────
 
     def check(
         self,
@@ -97,67 +217,70 @@ class BreakevenStop:
         current_close:   float,
     ) -> tuple[float, bool]:
         """
-        Verifica e aplica o Breakeven Stop com cap de loss.
+        BE padrão com cap de loss — v3.6, sem alterações na lógica central.
+
+        Chamar APÓS check_mfe_exit() e check_mfe_runoff().
+        Se check_mfe_runoff() retornou True, NÃO chamar este método.
 
         Args:
-            entry_price:     Preço de entrada da posição.
-            sl_price:        SL atual (pode já estar em breakeven de chamada anterior).
-            candles_open:    Candles que a posição está aberta (já incrementado pelo MaxHold).
-            trailing_active: True se o trailing stop foi ativado.
-            current_close:   Preço de fechamento do candle atual.
+            entry_price:     preço de entrada da posição.
+            sl_price:        SL atual (pode já estar em breakeven).
+            candles_open:    candles que a posição está aberta.
+            trailing_active: True se trailing stop foi ativado.
+            current_close:   preço de fechamento do candle atual.
 
         Returns:
             (new_sl_price, triggered):
-                new_sl_price: entry_price se breakeven ativou (ou já estava ativo);
-                              sl_price original caso o trigger ainda não foi atingido.
+                new_sl_price: entry_price se BE ativou; sl_price original antes do trigger.
                 triggered:    True se o trade deve fechar como BREAKEVEN agora.
-                              Dispara em dois casos após o trigger:
-                              1. close <= entry_price (SL no entry atingido)
-                              2. close <= entry_price × (1 - cap_pct/100) (cap de loss)
         """
-        # Trailing ativo → breakeven não interfere (gain já protegido)
+        # Trailing ativo → BE não interfere
         if trailing_active:
             return sl_price, False
 
-        # Antes do trigger → janela normal de resolução
+        # Antes do trigger → janela normal
         if candles_open < self.cfg.trigger_candles:
             return sl_price, False
 
-        # ── A partir do candle trigger: SL move para entry_price ───────────────
-        # O SL fica em max(entry_price, sl_price_atual) para não recuar um
-        # trailing que já tenha subido o SL acima do entry.
+        # A partir do trigger: SL move para entry_price
         new_sl = max(entry_price, sl_price)
 
-        # Nível do cap de loss: preço mínimo tolerado antes de fechar
+        # Nível do cap de loss
         cap_floor = entry_price * (1.0 - self.cfg.loss_cap_pct / 100.0)
 
-        # Trigger 1: cap de loss — close caiu além do limite tolerado
+        # Trigger 1: cap de loss atingido
         if current_close <= cap_floor:
             logger.info(
-                "Breakeven CAP_LOSS | candles=%d entry=%.6f cap_floor=%.6f "
-                "close=%.6f loss_pct=%.4f%%",
-                candles_open, entry_price, cap_floor,
-                current_close,
-                (entry_price - current_close) / entry_price * 100,
+                "breakeven_cap_loss",
+                candles=candles_open,
+                entry=round(entry_price, 6),
+                cap_floor=round(cap_floor, 6),
+                close=round(current_close, 6),
+                loss_pct=round((entry_price - current_close) / entry_price * 100.0, 4),
             )
             return new_sl, True
 
-        # Trigger 2: SL no entry atingido — close voltou para/abaixo do entry
+        # Trigger 2: SL no entry atingido
         if current_close <= new_sl:
             logger.info(
-                "Breakeven SL_AT_ENTRY | candles=%d entry=%.6f sl=%.6f close=%.6f",
-                candles_open, entry_price, new_sl, current_close,
+                "breakeven_sl_at_entry",
+                candles=candles_open,
+                entry=round(entry_price, 6),
+                sl=round(new_sl, 6),
+                close=round(current_close, 6),
             )
             return new_sl, True
 
-        # Breakeven ativo mas trade ainda aberto (close entre cap_floor e new_sl não existe;
-        # close está acima do entry) → SL permanece no entry, trade continua
+        # BE ativo mas trade ainda aberto (close acima do entry)
         if new_sl > sl_price:
             logger.info(
-                "Breakeven ATIVADO | candles=%d entry=%.6f old_sl=%.6f "
-                "new_sl=%.6f close=%.6f cap_floor=%.6f",
-                candles_open, entry_price, sl_price, new_sl,
-                current_close, cap_floor,
+                "breakeven_activated",
+                candles=candles_open,
+                entry=round(entry_price, 6),
+                old_sl=round(sl_price, 6),
+                new_sl=round(new_sl, 6),
+                close=round(current_close, 6),
+                cap_floor=round(cap_floor, 6),
             )
 
         return new_sl, False

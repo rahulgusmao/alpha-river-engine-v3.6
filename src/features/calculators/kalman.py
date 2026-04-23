@@ -224,7 +224,10 @@ class KalmanCalculator:
             ss_res = np.sum((r_arr - e_arr) ** 2)
             ss_tot = np.sum((r_arr - r_arr.mean()) ** 2)
 
-            r2 = float(1.0 - ss_res / (ss_tot + _EPSILON))
+            if ss_tot < _EPSILON:
+                r2 = 0.0  # sem variância nos retornos → modelo não pode explicar nada
+            else:
+                r2 = float(1.0 - ss_res / ss_tot)
             r2 = float(np.clip(r2, -1.0, 1.0))   # R² pode ser negativo se modelo ruim
             kal_active = r2 < self._r2_threshold
 

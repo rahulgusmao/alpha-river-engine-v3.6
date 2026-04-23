@@ -115,6 +115,7 @@ class ExecutionEngine:
         # posições já estão abertas, levando a super-alavancagem ilimitada.
         # Unidade: USDT de margem = notional / leverage.
         self._allocated_margin: float = 0.0
+        self._margin_lock = asyncio.Lock()
 
         # Fila de saída para o StateManager
         self.output_queue: asyncio.Queue = asyncio.Queue(maxsize=2_000)
@@ -302,9 +303,10 @@ class ExecutionEngine:
           3. Avalia posições do símbolo (trailing + max_hold)
           4. Executa saídas como tasks não-bloqueantes
         """
+        candle: ClosedCandle | None = None  # pre-assign para que o except possa referenciar
         while True:
             try:
-                candle: ClosedCandle = await queue.get()
+                candle = await queue.get()
                 current_close = candle.candle.close
 
                 # 1. [DRY RUN ONLY] Simula SL server-side verificando candle.low
@@ -364,7 +366,12 @@ class ExecutionEngine:
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                log.error("candle_loop_error", error=str(exc))
+                log.error(
+                    "candle_loop_error",
+                    error=str(exc),
+                    symbol=getattr(candle, "symbol", "?") if candle else "?",
+                    exc_info=True,
+                )
 
     # ── Balance Loop ─────────────────────────────────────────────────────────
 
@@ -470,7 +477,8 @@ class ExecutionEngine:
             # [Dry run] Registra margem alocada para reduzir available_capital
             if self._dry_run:
                 margin_used = (fill.fill_price * fill.fill_qty) / max(self._leverage, 1)
-                self._allocated_margin += margin_used
+                async with self._margin_lock:
+                    self._allocated_margin += margin_used
 
             await self._monitor.add(position)
 
@@ -607,7 +615,8 @@ class ExecutionEngine:
                 self._wallet_balance  = self._portfolio_value
                 # Libera a margem alocada desta posição
                 margin_freed = (entry_price * qty) / max(self._leverage, 1)
-                self._allocated_margin = max(0.0, self._allocated_margin - margin_freed)
+                async with self._margin_lock:
+                    self._allocated_margin = max(0.0, self._allocated_margin - margin_freed)
 
             sign = "+" if pnl_usdt >= 0 else ""
             log.info(
@@ -661,7 +670,8 @@ class ExecutionEngine:
         # [Dry run] Restaura margem alocada para manter available_capital correto
         if self._dry_run:
             margin_used = (position.entry_price * position.qty) / max(self._leverage, 1)
-            self._allocated_margin += margin_used
+            async with self._margin_lock:
+                self._allocated_margin += margin_used
 
         log.info(
             "position_injected_from_recovery",

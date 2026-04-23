@@ -19,6 +19,7 @@ Nota sobre lsr_n em candles sem LSR:
 """
 
 import asyncio
+import math
 from typing import Dict, List, Optional
 
 import structlog
@@ -209,6 +210,13 @@ class FeatureEngine:
                 rsi_ok=rsi is not None,
             )
             return None
+
+        # ── NaN guard: descarta se qualquer feature é NaN/Inf ────────────
+        for name, val in [("zvol_n", zvol_n), ("cvd_n", cvd_n), ("lsr_n", lsr_n),
+                          ("adx_n", adx_n), ("atr14", atr14), ("rsi", rsi)]:
+            if math.isnan(val) or math.isinf(val):
+                logger.warning("feature_nan_detected", symbol=symbol, feature=name, value=val)
+                return None
 
         fs = FeatureSet(
             symbol=symbol,

@@ -19,7 +19,7 @@ structlog>=24.0.0       # logging estruturado (JSON)
 
 # ── Dashboard web ─────────────────────────────────
 fastapi>=0.110.0        # API HTTP + WebSocket para o dashboard
-uvicorn[standard]>=0.29.0  # [standard] inclui 'websockets' — obrigatório para o endpoint /ws
+uvicorn>=0.29.0         # servidor ASGI assíncrono (integra no asyncio da engine)
 
 # ── Monitoramento / Alertas ───────────────────────
 python-telegram-bot>=21.0  # alertas Telegram (Monitoramento — futuro)

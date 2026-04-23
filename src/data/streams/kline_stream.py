@@ -230,7 +230,8 @@ class KlineStream:
                 logger.info("ws_cancelled", stream_id=self._stream_id)
                 break
 
-            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+            except (aiohttp.ClientError, asyncio.TimeoutError, OSError,
+                    ConnectionError) as exc:
                 self._reconnect_count += 1
                 logger.warning(
                     "ws_disconnected",
@@ -241,14 +242,16 @@ class KlineStream:
                 )
 
             except Exception as exc:
-                # Erro inesperado — loga e reconecta (não deixa o stream morrer)
-                self._reconnect_count += 1
+                # Erro inesperado (bug de programação) — loga com stack trace e re-levanta
+                # para que o erro não fique mascarado como desconexão de rede.
                 logger.error(
                     "ws_unexpected_error",
                     stream_id=self._stream_id,
                     error=str(exc),
                     reconnect_attempt=self._reconnect_count,
+                    exc_info=True,
                 )
+                raise
 
             if not self._running:
                 break

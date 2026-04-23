@@ -132,6 +132,8 @@ class BinanceRestClient:
         await self._check_rate_limit(weight)
 
         async with self._semaphore:
+            _429_retries = 0
+            _MAX_429_RETRIES = 3
             for attempt in range(1, self._max_retries + 1):
                 try:
                     session = await self._get_session()
@@ -141,15 +143,23 @@ class BinanceRestClient:
                             return await resp.json()
 
                         elif resp.status == 429:
+                            _429_retries += 1
+                            if _429_retries > _MAX_429_RETRIES:
+                                logger.error(
+                                    "http_429_max_retries_exceeded",
+                                    url=url,
+                                    retries=_429_retries,
+                                )
+                                return None
                             # Rate limit atingido — Binance indica Retry-After
                             retry_after = int(resp.headers.get("Retry-After", 15))
                             logger.warning(
                                 "http_429_rate_limited",
                                 url=url,
                                 retry_after=retry_after,
+                                retry=_429_retries,
                             )
                             await asyncio.sleep(retry_after)
-                            # Não conta como tentativa — é backoff forçado da Binance
 
                         elif resp.status == 418:
                             # IP banido temporariamente — aguarda mais tempo

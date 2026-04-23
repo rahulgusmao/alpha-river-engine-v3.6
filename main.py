@@ -85,7 +85,57 @@ def load_config() -> dict:
     with open(config_path, encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
+    _validate_config(config, config_path)
     return config
+
+
+def _validate_config(config: dict, path: Path) -> None:
+    """Valida campos obrigatórios e ranges do config."""
+    errors: List[str] = []
+
+    # Seções obrigatórias
+    for section in ("network", "data", "signal", "execution", "risk", "kill_switch"):
+        if section not in config:
+            errors.append(f"Seção obrigatória ausente: '{section}'")
+
+    sig = config.get("signal", {})
+    risk = config.get("risk", {})
+
+    # Score threshold: deve estar em (0, 2)
+    st = sig.get("score_threshold", 0.40)
+    if not (0.0 < st < 2.0):
+        errors.append(f"signal.score_threshold={st} fora do range (0, 2)")
+
+    # RSI threshold: deve estar em (0, 100)
+    rsi_t = sig.get("rsi_secondary_threshold", 30)
+    if not (0 < rsi_t < 100):
+        errors.append(f"signal.rsi_secondary_threshold={rsi_t} fora do range (0, 100)")
+
+    # Risk per trade: deve estar em (0, 0.5)
+    rpt = risk.get("risk_per_trade_pct", 0.01)
+    if not (0.0 < rpt <= 0.50):
+        errors.append(f"risk.risk_per_trade_pct={rpt} fora do range (0, 0.50]")
+
+    # Max hold candles: deve ser positivo
+    mh = risk.get("max_hold_candles", 8)
+    if mh < 1:
+        errors.append(f"risk.max_hold_candles={mh} deve ser >= 1")
+
+    # Trailing activation: deve ser > 1.0
+    ta = risk.get("trailing_activation_ratio", 1.002)
+    if ta <= 1.0:
+        errors.append(f"risk.trailing_activation_ratio={ta} deve ser > 1.0")
+
+    # Trailing capture: deve estar em (0, 1]
+    tc = risk.get("trailing_capture_ratio", 0.90)
+    if not (0.0 < tc <= 1.0):
+        errors.append(f"risk.trailing_capture_ratio={tc} fora do range (0, 1]")
+
+    if errors:
+        print(f"[ERRO] Config inválido ({path}):", file=sys.stderr)
+        for e in errors:
+            print(f"  - {e}", file=sys.stderr)
+        sys.exit(1)
 
 # ──────────────────────────── FANOUT ──────────────────────────────────────────
 
@@ -109,6 +159,39 @@ async def candle_fanout(
             break
         except Exception as exc:
             logger.error("candle_fanout_error", error=str(exc))
+
+# ──────────────────────────── HEALTH CHECK ────────────────────────────────────
+
+async def _pipeline_health_check(
+    tasks: List[asyncio.Task],
+    interval_sec: float = 60.0,
+) -> None:
+    """
+    Verifica periodicamente se todas as tasks críticas do pipeline ainda estão vivas.
+    Loga um alerta CRITICAL se alguma morreu silenciosamente (sem cancelamento).
+    Encerra quando todas as tasks terminam normalmente ou são canceladas.
+    """
+    while True:
+        try:
+            await asyncio.sleep(interval_sec)
+        except asyncio.CancelledError:
+            return
+
+        alive = [t for t in tasks if not t.done()]
+        dead  = [t for t in tasks if t.done() and not t.cancelled()]
+
+        for t in dead:
+            exc = t.exception() if not t.cancelled() else None
+            logger.critical(
+                "pipeline_task_died",
+                task=t.get_name(),
+                exception=str(exc) if exc else "sem exceção (retorno limpo inesperado)",
+            )
+
+        if not alive:
+            logger.info("health_check_all_tasks_done")
+            return
+
 
 # ──────────────────────────── MAIN ────────────────────────────────────────────
 
@@ -233,6 +316,16 @@ async def main() -> None:
                 "dashboard_active",
                 url=f"http://localhost:{cfg_dash.get('port', 8080)}",
             )
+
+        # Health check — monitora tasks críticas e alerta se uma morrer silenciosamente
+        # (ex: exceção não tratada dentro de asyncio.gather com return_exceptions=True)
+        _pipeline_tasks = [t for t in tasks if t.get_name() != "dashboard"]
+        tasks.append(
+            asyncio.create_task(
+                _pipeline_health_check(_pipeline_tasks),
+                name="health_check",
+            )
+        )
 
         logger.info(
             "pipeline_active",

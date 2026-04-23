@@ -29,11 +29,3 @@ logs/
 .idea/
 *.swp
 *.swo
-
-# Arquivos locais / Windows
-run_dryrun.ps1
-*.BACKUP_*.db
-*_backup.db
-
-# Arquivos de teste e temporários
-teste1.txt

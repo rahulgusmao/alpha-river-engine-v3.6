@@ -24,10 +24,11 @@ Resultado empírico (backtest Fase 1, Jan-Fev 2026):
   Maior impacto: redução de MaxHold exits de WR=5.3%
 """
 
-import logging
 from dataclasses import dataclass
 
-logger = logging.getLogger(__name__)
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 
 @dataclass
@@ -94,8 +95,8 @@ class DecaySLChecker:
         """
         if entry_atr <= 0.0:
             logger.warning(
-                "DecaySL: entry_atr=0.0 — impossível calcular SL decay. "
-                "Verifique se entry_atr foi populado no OrderSpec."
+                "decay_sl_zero_atr",
+                hint="entry_atr=0.0 — impossível calcular SL decay",
             )
             return 0.0
 
@@ -103,8 +104,13 @@ class DecaySLChecker:
         sl = entry_price - mult * entry_atr
 
         logger.debug(
-            "DecaySL | candles=%d phase=%d mult=%.1f entry=%.4f atr=%.4f sl=%.4f",
-            candles_open, phase, mult, entry_price, entry_atr, sl,
+            "decay_sl_computed",
+            candles=candles_open,
+            phase=phase,
+            mult=mult,
+            entry=round(entry_price, 4),
+            atr=round(entry_atr, 4),
+            sl=round(sl, 4),
         )
         return sl
 
@@ -134,6 +140,9 @@ class DecaySLChecker:
                 effective_sl: O SL mais restritivo (max entre decay_sl e current_sl).
                 triggered:    True se current_close <= effective_sl.
         """
+        if entry_atr <= 0.0:
+            return current_sl_price, False
+
         decay_sl = self.compute_sl(entry_price, entry_atr, candles_open)
 
         # Aplica apenas se decay_sl for mais restritivo (maior) que o SL atual
@@ -143,10 +152,14 @@ class DecaySLChecker:
 
         if triggered:
             logger.info(
-                "DecaySL TRIGGERED | close=%.4f <= sl=%.4f (decay_sl=%.4f current_sl=%.4f) | "
-                "candles=%d entry=%.4f atr=%.4f",
-                current_close, effective_sl, decay_sl, current_sl_price,
-                candles_open, entry_price, entry_atr,
+                "decay_sl_triggered",
+                close=round(current_close, 4),
+                sl=round(effective_sl, 4),
+                decay_sl=round(decay_sl, 4),
+                current_sl=round(current_sl_price, 4),
+                candles=candles_open,
+                entry=round(entry_price, 4),
+                atr=round(entry_atr, 4),
             )
 
         return effective_sl, triggered

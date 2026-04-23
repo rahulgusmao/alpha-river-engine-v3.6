@@ -22,14 +22,15 @@ class CloseReason(str, Enum):
     Razão de encerramento de uma posição.
     Gravada no trade log para análise de performance posterior.
     """
-    SL          = "SL"           # stop loss atingido (inicial ou decay)
-    DECAY_SL    = "DECAY_SL"     # v3.3: SL Time-Decay atingido (fase 3, mult 0.8×ATR)
-    TRAILING    = "TRAILING"     # trailing stop atingido
-    FLOW_CB     = "FLOW_CB"      # v3.3: Flow Circuit Breaker (CVD_n < -0.9 por 4c + close < entry)
-    BREAKEVEN   = "BREAKEVEN"    # v3.4: Breakeven Stop (c8 sem trailing + close <= entry)
-    MAX_HOLD    = "MAX_HOLD"     # máximo de candles atingido (20c = 5h em v3.3)
-    KILL_SWITCH = "KILL_SWITCH"  # kill switch ativado (BTC.D ou drawdown)
-    MANUAL      = "MANUAL"       # encerramento manual
+    SL                  = "SL"                  # stop loss atingido (inicial ou decay)
+    DECAY_SL            = "DECAY_SL"            # v3.3: SL Time-Decay atingido (fase 3, mult 0.8×ATR)
+    TRAILING            = "TRAILING"            # trailing stop atingido
+    FLOW_CB             = "FLOW_CB"             # v3.3: Flow Circuit Breaker (CVD_n < -0.9 por 4c + close < entry)
+    BREAKEVEN           = "BREAKEVEN"           # v3.4: Breakeven Stop (c4 sem trailing + close <= entry)
+    BREAKEVEN_MFE_EXIT  = "BREAKEVEN_MFE_EXIT"  # v4.0: MFE Gate — exit antecipada c3 (trade nunca subiu)
+    MAX_HOLD            = "MAX_HOLD"            # máximo de candles atingido (20c = 5h)
+    KILL_SWITCH         = "KILL_SWITCH"         # kill switch ativado (BTC.D ou drawdown)
+    MANUAL              = "MANUAL"              # encerramento manual
 
 
 @dataclass

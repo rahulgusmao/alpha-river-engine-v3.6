@@ -23,10 +23,7 @@ Uso:
 
 import asyncio
 import json
-import os
-import shutil
 import time
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import structlog
@@ -500,9 +497,7 @@ function handleEvent(evt) {
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 function connectWS() {
-// WebSocket Secure em HTTPS (Railway), ws:// em HTTP (local)
-  const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const wsUrl = wsProto + '//' + location.host + '/ws';
+  const wsUrl = 'ws://' + location.host + '/ws';
   const ws = new WebSocket(wsUrl);
   const dot   = document.getElementById('ws-dot');
   const label = document.getElementById('ws-label');
@@ -557,9 +552,7 @@ class DashboardServer:
     ):
         cfg_dash = config.get("dashboard", {})
         self._host    = cfg_dash.get("host", "0.0.0.0")
-        # Railway injeta $PORT dinamicamente — tem prioridade sobre o config.yaml.
-        # Se $PORT não existir (ambiente local), usa o valor do config ou 8080.
-        self._port    = int(os.environ.get("PORT") or cfg_dash.get("port", 8080))
+        self._port    = int(cfg_dash.get("port", 8080))
         self._sm      = state_manager
         self._bus     = event_bus
         self._dry_run = config.get("execution", {}).get("dry_run", False)
@@ -598,11 +591,6 @@ class DashboardServer:
     def _build_app(self) -> FastAPI:
         app = FastAPI(title="Alpha River Monitor", docs_url=None, redoc_url=None)
 
-        @app.get("/health")
-        async def health():
-            """Endpoint de healthcheck para o Railway confirmar que o serviço está ativo."""
-            return {"status": "ok", "service": "alpha-river-engine"}
-
         @app.get("/", response_class=HTMLResponse)
         async def root():
             return HTMLResponse(content=_DASHBOARD_HTML)
@@ -610,64 +598,6 @@ class DashboardServer:
         @app.get("/api/snapshot")
         async def snapshot():
             return await self._build_snapshot()
-
-        @app.get("/download/db")
-        async def download_db(token: str = ""):
-            """
-            Baixa uma cópia snapshot do banco SQLite para diagnóstico.
-
-            Protegido por token secreto configurado via variável de ambiente
-            DOWNLOAD_TOKEN. Sem o token correto, retorna 401/403.
-
-            Uso:
-                https://seu-projeto.up.railway.app/download/db?token=SEU_TOKEN
-            """
-            import tempfile
-            from fastapi import HTTPException
-            from fastapi.responses import FileResponse
-
-            # Valida token
-            expected = os.environ.get("DOWNLOAD_TOKEN", "")
-            if not expected:
-                raise HTTPException(
-                    status_code=503,
-                    detail="DOWNLOAD_TOKEN não configurado no ambiente.",
-                )
-            if token != expected:
-                log.warning("download_db_unauthorized", token_provided=bool(token))
-                raise HTTPException(
-                    status_code=403,
-                    detail="Token inválido.",
-                )
-
-            # Verifica se o DB existe
-            # Lê DB_PATH do ambiente (mesmo padrão do StateManager)
-            db_path = os.environ.get("DB_PATH", "alpha_river_dryrun.db")
-            db_file = Path(db_path)
-            if not db_file.exists():
-                raise HTTPException(
-                    status_code=404,
-                    detail=f"Banco não encontrado em: {db_path}",
-                )
-
-            # Cria uma cópia temporária para evitar leitura de arquivo parcialmente
-            # escrito pelo SQLite (SQLite é safe para leitura concorrente, mas
-            # uma cópia snapshot garante consistência do arquivo baixado).
-            tmp_dir  = Path(tempfile.mkdtemp())
-            tmp_copy = tmp_dir / "alpha_river_snapshot.db"
-            shutil.copy2(db_file, tmp_copy)
-
-            log.info(
-                "download_db_requested",
-                db_path=str(db_file),
-                size_kb=round(tmp_copy.stat().st_size / 1024, 1),
-            )
-
-            return FileResponse(
-                path=str(tmp_copy),
-                media_type="application/octet-stream",
-                filename="alpha_river_snapshot.db",
-            )
 
         @app.websocket("/ws")
         async def websocket_endpoint(ws: WebSocket):

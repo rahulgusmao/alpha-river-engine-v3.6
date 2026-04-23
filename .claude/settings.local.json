@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -m py_compile src/data/rest/btcd_fetcher.py)",
+      "Bash(python -m py_compile src/data/rest/binance_rest.py)",
+      "Bash(python -m py_compile src/execution/execution_engine.py)",
+      "Bash(python -m py_compile src/execution/position_monitor.py)",
+      "Bash(python -m py_compile src/features/calculators/kalman.py)",
+      "Bash(python -m pytest tests/unit/ -v)",
+      "Bash(pip install *)"
+    ]
+  }
+}

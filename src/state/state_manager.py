@@ -36,8 +36,7 @@ Atualização de estado do monitor:
 """
 
 import asyncio
-import os
-from pathlib import Path
+import time
 from typing import TYPE_CHECKING, Optional
 
 import structlog
@@ -71,10 +70,7 @@ class StateManager:
 
     def __init__(self, config: dict, event_bus: Optional["EventBus"] = None):
         cfg_state = config.get("state", {})
-        # DB_PATH env var sobrescreve o config — usado pelo Railway para apontar ao Volume
-        db_path   = os.environ.get("DB_PATH") or cfg_state.get("db_path", "alpha_river_state.db")
-        Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._db_path = db_path
+        db_path   = cfg_state.get("db_path", "alpha_river_state.db")
         self._db  = PositionDB(db_path)
 
         # Cache de posições abertas: position_id → Position
@@ -88,27 +84,7 @@ class StateManager:
         self._dry_run: bool = config.get("execution", {}).get("dry_run", False)
 
     async def initialize(self) -> None:
-        """
-        Cria o banco e aplica o schema. Chamar uma vez no startup.
-
-        Se a variável de ambiente RESET_DB=1 estiver definida, o arquivo do banco
-        é deletado antes de inicializar — inicia do zero com capital limpo.
-        Use via Railway Settings > Variables: adicione RESET_DB=1, faça redeploy,
-        depois remova a variável para evitar reset em futuros deploys.
-        """
-        # ── Reset controlado via env var ─────────────────────────────────────────
-        if os.environ.get("RESET_DB") == "1":
-            db_file = Path(self._db_path)
-            if db_file.exists():
-                db_file.unlink()
-                log.warning(
-                    "state_manager_db_reset",
-                    db_path=self._db_path,
-                    hint="RESET_DB=1 detectado — banco deletado. Remova a variável para evitar reset em futuros deploys.",
-                )
-            else:
-                log.info("state_manager_db_reset_noop", hint="RESET_DB=1 mas banco não existia — nenhuma ação.")
-
+        """Cria o banco e aplica o schema. Chamar uma vez no startup."""
         await self._db.initialize()
 
         stats = await self._db.get_stats()
@@ -326,7 +302,6 @@ class StateManager:
 
         # Notifica dashboard
         if self._bus:
-            import time as _time
             self._bus.publish("position_closed", {
                 "position_id":  report.position_id,
                 "symbol":       report.symbol,
@@ -334,7 +309,7 @@ class StateManager:
                 "close_reason": report.close_reason,
                 "pnl_usdt":     report.pnl_usdt,
                 "pnl_pct":      report.pnl_pct,
-                "closed_at":    int(_time.time() * 1000),
+                "closed_at":    int(time.time() * 1000),
             })
 
         sign = "+" if report.pnl_usdt >= 0 else ""

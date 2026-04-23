@@ -64,8 +64,17 @@ signal:
     adx:  0.07
     kal:  0.30
 
-  # Critério de ativação do Kalman (Tier 3)
-  kalman_r2_threshold: 0.30           # kal_active = True se R²(500c) < 0.30
+  # ── v4.0: Kalman por Tier (AF 13.3 / P33 / P34) ──────────────────────────
+  # Tier 1/2: Kalman DESATIVADO (R² alto c/ BTC → Alpha é ruído).
+  # Tier 3:   Kalman ATIVO com peso dinâmico via R².
+  #
+  # Critério P34 de elegibilidade (Tier 3):
+  #   R² < kalman_r2_full_below  → peso máximo (kalman_max_weight)
+  #   R² > kalman_r2_zero_above  → peso zero (Kalman ignorado)
+  #   faixa intermediária        → interpolação linear
+  kalman_r2_full_below: 0.25          # era: kalman_r2_threshold=0.30 (P34 revisado)
+  kalman_r2_zero_above: 0.35          # acima disto: Kalman sem edge
+  kalman_max_weight: 0.20             # peso máximo Kalman no score (AF 13.3: ≤ 0.20)
   kalman_r2_window: 500               # candles para rolling R²
 
   # Multiplicadores OI por regime
@@ -122,9 +131,10 @@ risk:
   sl_atr_multiplier: 2.0              # SL = entry - 2 × ATR(14)
 
   # MaxHold: fecha posição após N candles sem atingir SL ou trailing
-  # v3.6 — MH=8 (era 20); evidência live Abr/2026: decay exponencial de PnL pós-c4
-  # Combinado com BE no c4, o MH no c8 é a última linha de defesa (janela 2h).
-  max_hold_candles: 8                 # 8 candles × 15m = 2 horas
+  # v4.0 — MH=20 (P37 Rev. grid search validou ótimo em 20c; degradação acima).
+  # v3.6 — MH=8 (era 20 em v3.3). Ajustado via grid sweep com MFE gates ativos.
+  # Combinado com BE c4 + MFE Gate (Q4.1), trades ruins saem cedo, bons correm até c9.
+  max_hold_candles: 20                # 20 candles × 15m = 5 horas
 
   # DELEV sizing: reduz exposição pela metade em regime de desalavancagem
   delev_size_multiplier: 0.5
@@ -153,19 +163,33 @@ risk:
   # Rejeita entrada se ATR/entry_price > threshold (símbolo de alta volatilidade)
   d2_atr_entry_max_ratio: 0.30        # ATR/entry > 30% → sem entrada
 
-  # ── v3.6: Breakeven Stop ───────────────────────────────────────────────────
-  # Trigger: candle 4 (era 8). Grid search live (7.142 trades, Abr/2026):
-  # 100% dos winners via TRAILING fecham em ≤ 4 candles. Pós-c4 sem trailing
-  # = zumbi. Cap de loss 0.50% limita perda máxima entre c4 e c8 (MH).
+  # ── v4.0: SHORT_BUILD Gate (P77) ───────────────────────────────────────────
+  # Bloqueia entrada quando OI regime = SHORT_BUILD.
+  # Evidência backtest: único regime com WR<50% e avg_net=-0.35%.
+  # SHORT_BUILD = OI↑ + preço↓ = capital novo alocado CONTRA a posição Long.
+  block_short_build: true
+
+  # ── v3.6 / v4.0: Breakeven Stop ────────────────────────────────────────────
+  # Trigger: candle 4. Grid search live (7.142 trades, Abr/2026):
+  # 100% dos winners via TRAILING fecham em ≤ 4 candles.
   #
-  # Lógica:
-  #   c4+: SL move para entry_price
-  #   c4+: se close <= entry × (1 - loss_cap_pct/100) → fecha BREAKEVEN
-  #   c4+: se close > entry → SL no entry, trade aguarda trailing ou MH
+  # v4.0 (Q4.1): MFE Gate adicionado. Lógica seletiva:
+  #   c3 (pré-BE): MFE<0.05% + cvd_n<-0.5 → exit antecipada (trade estruturalmente ruim)
+  #   c4+:         MFE>0.50% + cvd_n>0    → allow runoff (não forçar BE — regime institucional)
+  #   c4+:         MFE<=0.50%             → lógica BE padrão (SL=entry + cap)
   #
-  # Simulação sobre dados reais: P&L +42 USDT → +1.127 USDT com cap 0.50%
-  breakeven_trigger_candles: 4         # v3.6: era 8
-  breakeven_loss_cap_pct: 0.50         # v3.6: novo — % max de loss abaixo do entry
+  # Simulação sobre dados reais: P&L +42 USDT → +1.127 USDT (BE) + ~1.0k (MFE gate)
+  breakeven_trigger_candles: 4
+  breakeven_loss_cap_pct: 0.50
+
+  # ── v4.0: MFE Gate (Q4.1) ──────────────────────────────────────────────────
+  # Seletividade baseada em Max Favorable Excursion — 57% dos breakevens têm MFE=0.
+  # Gate de saída antecipada (c3): trade nunca subiu + fluxo deteriorado → exit.
+  # Gate de runoff (c4+): trade com ganho real + OI/CVD confirmando → deixar correr.
+  mfe_exit_threshold_pct: 0.05        # MFE abaixo → candidato a exit antecipada
+  mfe_exit_cvd_threshold: -0.5        # cvd_n mínimo para confirmar saída (zscore norm)
+  mfe_runoff_threshold_pct: 0.50      # MFE acima → candidato a runoff (não fechar no BE)
+  mfe_runoff_cvd_min: 0.0             # cvd_n mínimo para confirmar runoff
 
 # ─────────────────────────────────────────────────
 # KILL SWITCH

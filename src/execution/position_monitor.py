@@ -223,6 +223,7 @@ class PositionMonitor:
         """Retorna a posição pelo ID ou None se não encontrada."""
         return self._positions.get(position_id)
 
-    def snapshot(self) -> list[Position]:
+    async def snapshot(self) -> list[Position]:
         """Retorna cópia da lista de posições abertas (para logging/StateManager)."""
-        return list(self._positions.values())
+        async with self._lock:
+            return list(self._positions.values())

@@ -69,6 +69,10 @@ class CVDCalculator:
         Returns:
             cvd_n em [-1, 1], ou None se janela insuficiente.
         """
+        # Guard: dados corrompidos onde taker_buy > total (impossível normalmente)
+        if taker_buy_base_vol > total_volume:
+            taker_buy_base_vol = total_volume
+
         cvd_delta = taker_buy_base_vol - (total_volume - taker_buy_base_vol)
 
         if symbol not in self._buffers:
@@ -83,4 +87,10 @@ class CVDCalculator:
         arr = np.array(buf, dtype=np.float64)
         std = arr.std()
 
-        return float(np.tanh(cvd_delta / (std + _EPSILON)))
+        if std < _EPSILON:
+            return 0.0  # sem variância → sinal neutro
+
+        result = float(np.tanh(cvd_delta / std))
+        if np.isnan(result):
+            return 0.0
+        return result

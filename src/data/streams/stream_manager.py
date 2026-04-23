@@ -125,6 +125,11 @@ class StreamManager:
             lsr_ok=lsr is not None,
         )
 
+    # Máximo de tasks de enriquecimento OI+LSR pendentes simultaneamente.
+    # ~400 tokens por boundary 15m × até 3 boundaries atrasados = 1200.
+    # Se exceder, aguarda tasks existentes finalizarem antes de criar novas.
+    _MAX_PENDING_TASKS = 1000
+
     async def _enrich_worker(self) -> None:
         """
         Worker que consome RawCandles da fila interna e dispara enriquecimento.
@@ -134,12 +139,33 @@ class StreamManager:
         pois ~400 tokens fecham ao mesmo tempo no boundary do 15m.
 
         As tasks de enriquecimento ficam em `_pending` e são monitoradas
-        para evitar acúmulo indefinido de tasks não coletadas.
+        para evitar acúmulo indefinido em caso de falha sustentada da API REST.
+        Quando `_MAX_PENDING_TASKS` é atingido, aguarda metade das tasks
+        finalizarem antes de aceitar novos candles.
         """
         pending: Set[asyncio.Task] = set()
 
         while self._running:
             try:
+                # Se o backlog está no limite, aguarda metade finalizar antes de prosseguir
+                if len(pending) >= self._MAX_PENDING_TASKS:
+                    logger.warning(
+                        "enrich_worker_backlog_cap",
+                        pending_tasks=len(pending),
+                        cap=self._MAX_PENDING_TASKS,
+                        hint="Aguardando tasks finalizarem antes de aceitar novos candles",
+                    )
+                    # Aguarda até que metade das tasks conclua
+                    done, pending = await asyncio.wait(
+                        pending, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    # Drena o restante concluído sem bloquear
+                    while True:
+                        done2, remaining = await asyncio.wait(pending, timeout=0)
+                        pending = remaining
+                        if not done2:
+                            break
+
                 # Aguarda o próximo candle com timeout para checar _running
                 try:
                     candle = await asyncio.wait_for(
@@ -152,7 +178,7 @@ class StreamManager:
                     pass  # sem candle — continua o loop
 
                 # Drena o restante da fila (rajada de 15m boundary)
-                while not self._raw_queue.empty():
+                while not self._raw_queue.empty() and len(pending) < self._MAX_PENDING_TASKS:
                     try:
                         candle = self._raw_queue.get_nowait()
                         task = asyncio.create_task(self._enrich_candle(candle))
@@ -161,14 +187,14 @@ class StreamManager:
                     except asyncio.QueueEmpty:
                         break
 
-                # Loga se o backlog de tasks pendentes estiver crescendo
+                # Aviso leve se backlog estiver crescendo (antes do hard cap)
                 if len(pending) > 200:
                     logger.warning("enrich_worker_backlog", pending_tasks=len(pending))
 
             except asyncio.CancelledError:
                 break
             except Exception as exc:
-                logger.error("enrich_worker_unexpected_error", error=str(exc))
+                logger.error("enrich_worker_unexpected_error", error=str(exc), exc_info=True)
 
         # Aguarda todas as tasks de enriquecimento em andamento finalizarem
         if pending:

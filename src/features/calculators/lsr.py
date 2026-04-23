@@ -73,4 +73,7 @@ class LSRCalculator:
         lo  = arr.min()
         hi  = arr.max()
 
-        return float((lsr - lo) / (hi - lo + _EPSILON))
+        if (hi - lo) < 1e-9:
+            return 0.5  # sem range → valor neutro
+
+        return float((lsr - lo) / (hi - lo))
