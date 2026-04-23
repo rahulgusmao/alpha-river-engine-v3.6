@@ -122,8 +122,8 @@ class ExecutionEngine:
 
         # Limite de posições abertas simultâneas.
         # Evita abertura ilimitada de posições durante períodos de alta volatilidade.
-        # Configurável via execution.max_open_positions (default: 50).
-        self._max_positions: int = cfg_exec.get("max_open_positions", 50)
+        # Configurável via execution.max_open_positions (default: 200).
+        self._max_positions: int = cfg_exec.get("max_open_positions", 200)
 
         # Conjunto de símbolos com entrada em andamento (deduplicação de ordens).
         # Necessário porque _order_loop cria tasks em paralelo — múltiplos

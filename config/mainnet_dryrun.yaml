@@ -75,7 +75,7 @@ execution:
   leverage: 3
   margin_type: "ISOLATED"
   balance_poll_interval_sec: 60   # irrelevante em dry_run
-  max_open_positions: 50          # hard cap de posições simultâneas
+  max_open_positions: 200          # hard cap de posições simultâneas
   # v3.6: comissão bilateral estimada deduzida do PnL (0.04% taker × 2 lados)
   commission_factor: 0.0008
 
