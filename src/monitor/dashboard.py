@@ -24,6 +24,7 @@ Uso:
 import asyncio
 import json
 import time
+import os
 from typing import TYPE_CHECKING
 
 import structlog
@@ -497,7 +498,8 @@ function handleEvent(evt) {
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 function connectWS() {
-  const wsUrl = 'ws://' + location.host + '/ws';
+  const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const wsUrl = wsProto + '//' + location.host + '/ws';
   const ws = new WebSocket(wsUrl);
   const dot   = document.getElementById('ws-dot');
   const label = document.getElementById('ws-label');
@@ -552,7 +554,7 @@ class DashboardServer:
     ):
         cfg_dash = config.get("dashboard", {})
         self._host    = cfg_dash.get("host", "0.0.0.0")
-        self._port    = int(cfg_dash.get("port", 8080))
+        self._port    = int(os.environ.get("PORT", cfg_dash.get("port", 8080)))
         self._sm      = state_manager
         self._bus     = event_bus
         self._dry_run = config.get("execution", {}).get("dry_run", False)
