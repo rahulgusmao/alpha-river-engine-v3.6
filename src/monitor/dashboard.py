@@ -591,6 +591,11 @@ class DashboardServer:
     def _build_app(self) -> FastAPI:
         app = FastAPI(title="Alpha River Monitor", docs_url=None, redoc_url=None)
 
+        @app.get("/health")
+        async def health():
+            """Endpoint de healthcheck para o Railway confirmar que o serviço está ativo."""
+            return {"status": "ok", "service": "alpha-river-engine-v3.6"}
+
         @app.get("/", response_class=HTMLResponse)
         async def root():
             return HTMLResponse(content=_DASHBOARD_HTML)
